@@ -4,38 +4,21 @@
 
 <#
 .SYNOPSIS
-Creates a Windows virtual machine scale set, set up for vcpkg's CI.
+Creates a Windows virtual machine scale set, set up for the MSVC compiler's vcpkg testing.
 
 .DESCRIPTION
-create-vmss.ps1 creates an Azure Windows VM scale set, set up for vcpkg's CI
-system. See https://docs.microsoft.com/en-us/azure/virtual-machine-scale-sets/overview
-for more information.
+See the script at ../windows/create-vmss.ps1 for more details. This script is similar except:
+* The name of the machines and resource group are changed
+* We don't provision an "archives" share
+* The firewall is not opened to allow access to Azure Storage from the VMs.
 
 This script assumes you have installed Azure tools into PowerShell by following the instructions
 at https://docs.microsoft.com/en-us/powershell/azure/install-az-ps?view=azps-3.6.1
 or are running from Azure Cloud Shell.
-
-.PARAMETER Unstable
-If this parameter is set, the machine is configured for use in the "unstable" pool used for testing
-the compiler rather than for testing vcpkg. Differences:
-* The machine prefix is changed to VcpkgUnstable instead of PrWin.
-* No storage account or "archives" share is provisioned.
-* The firewall is not opened to allow communication with Azure Storage.
 #>
 
-[CmdLetBinding()]
-Param(
-  [switch]$Unstable = $false
-)
-
 $Location = 'westus2'
-if ($Unstable) {
-  $Prefix = 'VcpkgUnstable-'
-} else {
-  $Prefix = 'PrWin-'
-}
-
-$Prefix += (Get-Date -Format 'yyyy-MM-dd')
+$Prefix = 'VcpkgUnstable-' + (Get-Date -Format 'yyyy-MM-dd')
 $VMSize = 'Standard_D16a_v4'
 $ProtoVMName = 'PROTOTYPE'
 $LiveVMPrefix = 'BUILD'
@@ -43,11 +26,7 @@ $WindowsServerSku = '2019-Datacenter'
 $ErrorActionPreference = 'Stop'
 
 $ProgressActivity = 'Creating Scale Set'
-$TotalProgress = 12
-if ($Unstable) {
-  $TotalProgress -= 1 # skipping the archives share part
-}
-
+$TotalProgress = 11
 $CurrentProgress = 1
 
 Import-Module "$PSScriptRoot/../create-vmss-helpers.psm1" -DisableNameChecking
@@ -106,20 +85,6 @@ $allowGit = New-AzNetworkSecurityRuleConfig `
   -DestinationAddressPrefix * `
   -DestinationPortRange 9418
 
-if (-Not $Unstable) {
-  $allowStorage = New-AzNetworkSecurityRuleConfig `
-    -Name AllowStorage `
-    -Description 'Allow Storage' `
-    -Access Allow `
-    -Protocol * `
-    -Direction Outbound `
-    -Priority 1011 `
-    -SourceAddressPrefix VirtualNetwork `
-    -SourcePortRange * `
-    -DestinationAddressPrefix Storage `
-    -DestinationPortRange *
-}
-
 $denyEverythingElse = New-AzNetworkSecurityRuleConfig `
   -Name DenyElse `
   -Description 'Deny everything else' `
@@ -133,18 +98,11 @@ $denyEverythingElse = New-AzNetworkSecurityRuleConfig `
   -DestinationPortRange *
 
 $NetworkSecurityGroupName = $ResourceGroupName + 'NetworkSecurity'
-$securityRules = @($allowHttp, $allowDns, $allowGit);
-if (-Not $Unstable) {
-  $securityRules += @($allowStorage)
-}
-
-$securityRules += @($denyEverythingElse)
-
 $NetworkSecurityGroup = New-AzNetworkSecurityGroup `
   -Name $NetworkSecurityGroupName `
   -ResourceGroupName $ResourceGroupName `
   -Location $Location `
-  -SecurityRules $securityRules
+  -SecurityRules @($allowHttp, $allowDns, $allowGit, $denyEverythingElse)
 
 $SubnetName = $ResourceGroupName + 'Subnet'
 $Subnet = New-AzVirtualNetworkSubnetConfig `
@@ -159,36 +117,6 @@ $VirtualNetwork = New-AzVirtualNetwork `
   -Location $Location `
   -AddressPrefix "10.0.0.0/16" `
   -Subnet $Subnet
-
-####################################################################################################
-if (-Not $Unstable) {
-  Write-Progress `
-    -Activity $ProgressActivity `
-    -Status 'Creating archives storage account' `
-    -PercentComplete (100 / $TotalProgress * $CurrentProgress++)
-
-  $StorageAccountName = Sanitize-Name $ResourceGroupName
-
-  New-AzStorageAccount `
-    -ResourceGroupName $ResourceGroupName `
-    -Location $Location `
-    -Name $StorageAccountName `
-    -SkuName 'Standard_LRS' `
-    -Kind StorageV2
-
-  $StorageAccountKeys = Get-AzStorageAccountKey `
-    -ResourceGroupName $ResourceGroupName `
-    -Name $StorageAccountName
-
-  $StorageAccountKey = $StorageAccountKeys[0].Value
-
-  $StorageContext = New-AzStorageContext `
-    -StorageAccountName $StorageAccountName `
-    -StorageAccountKey $StorageAccountKey
-
-  New-AzStorageShare -Name 'archives' -Context $StorageContext
-  Set-AzStorageShareQuota -ShareName 'archives' -Context $StorageContext -Quota 2048
-}
 
 ####################################################################################################
 Write-Progress `
@@ -231,18 +159,12 @@ Write-Progress `
   -Status 'Running provisioning script provision-image.txt (as a .ps1) in VM' `
   -PercentComplete (100 / $TotalProgress * $CurrentProgress++)
 
-$provisionParameters = @{AdminUserPassword = $AdminPW;}
-if (-Not $Unstable) {
-  $provisionParameters['StorageAccountName'] = $StorageAccountName
-  $provisionParameters['StorageAccountKey'] = $StorageAccountKey
-}
-
 $ProvisionImageResult = Invoke-AzVMRunCommand `
   -ResourceGroupName $ResourceGroupName `
   -VMName $ProtoVMName `
   -CommandId 'RunPowerShellScript' `
-  -ScriptPath "$PSScriptRoot\provision-image.txt" `
-  -Parameter $provisionParameters
+  -ScriptPath "$PSScriptRoot\..\windows\provision-image.txt" `
+  -Parameter @{AdminUserPassword = $AdminPW;}
 
 Write-Host "provision-image.ps1 output: $($ProvisionImageResult.value.Message)"
 
@@ -264,7 +186,7 @@ $SysprepResult = Invoke-AzVMRunCommand `
   -ResourceGroupName $ResourceGroupName `
   -VMName $ProtoVMName `
   -CommandId 'RunPowerShellScript' `
-  -ScriptPath "$PSScriptRoot\sysprep.ps1"
+  -ScriptPath "$PSScriptRoot\..\windows\sysprep.ps1"
 
 Write-Host "sysprep.ps1 output: $($SysprepResult.value.Message)"
 
