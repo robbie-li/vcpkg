@@ -91,6 +91,12 @@ if("opengl" IN_LIST FEATURES)
         )
 endif()
 
+if("utf8" IN_LIST FEATURES)
+    list(APPEND ADDITIONAL_OPTIONS
+        -DKWSYS_ENCODING_DEFAULT_CODEPAGE=CP_UTF8
+    )
+endif()
+
 if("cuda" IN_LIST FEATURES AND CMAKE_HOST_WIN32)
     vcpkg_add_to_path("$ENV{CUDA_PATH}/bin")
 endif()
